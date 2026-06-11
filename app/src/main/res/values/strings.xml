@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_description">Used only for two things you turn
+        on explicitly: (1) instantly dismissing the system\'s own screenshot
+        preview so only the Screenshot Toolbar popup appears, and (2) the
+        "Capture more" scrolling screenshot, where it scrolls the current app
+        and captures the screen while a visible progress indicator is shown.
+        It never reads or stores screen content at any other time, runs no
+        analytics, and has no network access.</string>
+</resources>
