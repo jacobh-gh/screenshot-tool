@@ -23,6 +23,10 @@ class ToolbarAccessibilityService : AccessibilityService() {
         private const val SYSTEMUI = "com.android.systemui"
         private const val PREVIEW_ID = "$SYSTEMUI:id/screenshot_preview"
         private const val STATIC_ID = "$SYSTEMUI:id/screenshot_static"
+        // How long to wait for the screenshot preview window to render after a
+        // SystemUI event before concluding "this wasn't a screenshot".
+        private const val PREVIEW_WAIT_MS = 1200L
+        private const val PREVIEW_POLL_MS = 100L
 
         @Volatile
         var instance: ToolbarAccessibilityService? = null
@@ -112,17 +116,62 @@ class ToolbarAccessibilityService : AccessibilityService() {
         // per-profile service can bind.
         if (!DetectionService.isRunning) return
 
-        if (prefs.getBoolean("hide_system_chrome", false)) {
-            for (delay in longArrayOf(250, 800, 1600)) {
-                handler.postDelayed({ dismissSystemChrome() }, delay)
+        // SystemUI fires window events for MANY things that are NOT screenshots
+        // — the volume panel, the notification shade, QS tiles, status-bar
+        // updates. Acting on the package alone popped the toolbar at random (on
+        // volume presses, etc.). Only proceed once the actual screenshot-preview
+        // window is on screen. It can render a beat after the first event, so
+        // poll briefly (matching the chrome-dismiss timing) rather than checking
+        // only the current instant, so real screenshots aren't missed.
+        whenScreenshotPreviewAppears {
+            if (prefs.getBoolean("hide_system_chrome", false)) {
+                for (delay in longArrayOf(0, 250, 800)) {
+                    handler.postDelayed({ dismissSystemChrome() }, delay)
+                }
+            }
+            // Debounce only on a CONFIRMED screenshot, so a real screenshot
+            // shortly after unrelated SystemUI activity isn't swallowed.
+            val now = System.currentTimeMillis()
+            if (now - lastPreviewHandledAt < 2500) return@whenScreenshotPreviewAppears
+            lastPreviewHandledAt = now
+            resolveAndShow(attempt = 0)
+        }
+    }
+
+    /** True if a SystemUI window containing the screenshot preview/static view
+     *  is currently present — the reliable "a screenshot was just taken"
+     *  signal, as opposed to any other SystemUI window event. */
+    private fun screenshotPreviewPresent(): Boolean = windows.any { w ->
+        val root = w.root ?: return@any false
+        root.packageName == SYSTEMUI &&
+            (root.findAccessibilityNodeInfosByViewId(PREVIEW_ID).isNotEmpty() ||
+                root.findAccessibilityNodeInfosByViewId(STATIC_ID).isNotEmpty())
+    }
+
+    // Guards against stacking multiple polling chains from a burst of events.
+    private var awaitingPreview = false
+
+    /**
+     * Run [onConfirmed] once the screenshot-preview window appears, polling for
+     * up to [PREVIEW_WAIT_MS]. If it never appears, this was not a screenshot
+     * (volume panel, shade, etc.) and nothing happens — no spurious popup.
+     */
+    private fun whenScreenshotPreviewAppears(onConfirmed: () -> Unit) {
+        if (screenshotPreviewPresent()) { onConfirmed(); return }
+        if (awaitingPreview) return
+        awaitingPreview = true
+        val deadline = System.currentTimeMillis() + PREVIEW_WAIT_MS
+        fun poll() {
+            if (screenshotPreviewPresent()) {
+                awaitingPreview = false
+                onConfirmed()
+            } else if (System.currentTimeMillis() >= deadline) {
+                awaitingPreview = false // not a screenshot; stay quiet
+            } else {
+                handler.postDelayed({ poll() }, PREVIEW_POLL_MS)
             }
         }
-        // Show our popup once the screenshot lands. Debounced across the burst
-        // of preview window events.
-        val now = System.currentTimeMillis()
-        if (now - lastPreviewHandledAt < 2500) return
-        lastPreviewHandledAt = now
-        resolveAndShow(attempt = 0)
+        handler.postDelayed({ poll() }, PREVIEW_POLL_MS)
     }
 
     /**
